@@ -39,3 +39,9 @@ export function normalizeK3sVersion(input?: string): string {
 
   return v;
 }
+
+// Inverse of normalizeK3sVersion for display/matching against Rancher's release list
+// (v1.36.5-k3s1 -> v1.36.5+k3s1)
+export function toReleaseName(tag?: string): string {
+  return (tag || '').replace(/-k3s(\d+)$/, '+k3s$1');
+}

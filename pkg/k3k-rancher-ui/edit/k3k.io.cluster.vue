@@ -7,10 +7,12 @@ import { LabeledInput } from '@components/Form/LabeledInput';
 import { RadioGroup } from '@components/Form/Radio';
 import { Banner } from '@components/Banner';
 import { Checkbox } from '@components/Form/Checkbox';
-import { STORAGE_CLASS } from '@shell/config/types';
+import { STORAGE_CLASS, MANAGEMENT } from '@shell/config/types';
 import {
-  MODES, PERSISTENCE_TYPES, EXPOSE_TYPES, K3S_IMAGE_TAG, normalizeK3sVersion
+  MODES, PERSISTENCE_TYPES, EXPOSE_TYPES, K3S_IMAGE_TAG, normalizeK3sVersion, toReleaseName
 } from '../types';
+import { getAllOptionsAfterCurrentVersion, filterOutDeprecatedPatchVersions } from '@shell/utils/cluster';
+import sortBy from 'lodash/sortBy';
 import impl from '@shell/mixins/create-edit-view/impl';
 import { ANNOTATIONS, defaultRancherName, prepareRancherImport } from '../utils/rancher-import';
 
@@ -25,6 +27,19 @@ export default {
   mixins: [CreateEditView],
 
   async fetch() {
+    // K3s releases Rancher supports (same KDM data as Cluster Management's version dropdown)
+    try {
+      const [releases, defaultSetting] = await Promise.all([
+        this.$store.dispatch('management/request', { url: '/v1-k3s-release/releases' }),
+        this.$store.dispatch('management/find', { type: MANAGEMENT.SETTING, id: 'k3s-default-version' }).catch(() => null),
+      ]);
+
+      this.k3sReleases = releases?.data || [];
+      this.defaultK3s = defaultSetting?.value || defaultSetting?.default || '';
+    } catch (e) {
+      this.k3sReleases = [];
+    }
+
     try {
       const classes = await this.$store.dispatch('cluster/findAll', { type: STORAGE_CLASS });
 
@@ -54,6 +69,9 @@ export default {
     }
 
     return {
+      k3sReleases:        null,
+      defaultK3s:         '',
+      showDeprecated:     false,
       importIntoRancher:  this.mode === 'create',
       rancherName:        '',
       createdProvCluster: null,
@@ -72,6 +90,57 @@ export default {
   },
 
   computed: {
+    // Version the cluster runs today, in Rancher's release-name form
+    currentRelease() {
+      if (this.isCreate) {
+        return null;
+      }
+
+      return toReleaseName(this.initialValue?.spec?.version) || null;
+    },
+
+    hostVersionLabel() {
+      const host = this.value.status?.hostVersion;
+
+      return host ? `Match host cluster (${ host })` : 'Match host cluster';
+    },
+
+    versionOptions() {
+      let opts = getAllOptionsAfterCurrentVersion(this.$store, this.k3sReleases || [], this.currentRelease, this.defaultK3s);
+
+      if (!this.showDeprecated) {
+        opts = filterOutDeprecatedPatchVersions(opts, this.currentRelease);
+      }
+
+      opts = sortBy(opts, 'sort').reverse();
+
+      // A version typed by hand or no longer offered by Rancher stays selectable
+      const selected = this.selectedRelease;
+
+      if (selected && !opts.find((o) => o.value === selected)) {
+        opts.unshift({ label: selected, value: selected });
+      }
+
+      return [{ label: this.hostVersionLabel, value: '' }, ...opts];
+    },
+
+    hasReleaseList() {
+      return !!this.k3sReleases?.length;
+    },
+
+    selectedRelease: {
+      get() {
+        return toReleaseName(this.value.spec.version);
+      },
+      set(release) {
+        if (release) {
+          this.value.spec.version = normalizeK3sVersion(release);
+        } else {
+          delete this.value.spec.version;
+        }
+      },
+    },
+
     linkedRancherCluster() {
       return this.value.metadata?.annotations?.[ANNOTATIONS.RANCHER_CLUSTER];
     },
@@ -237,7 +306,23 @@ export default {
         />
       </div>
       <div class="col span-6">
+        <template v-if="hasReleaseList">
+          <LabeledSelect
+            v-model:value="selectedRelease"
+            label="K3s version"
+            :options="versionOptions"
+            :mode="mode"
+          />
+          <Checkbox
+            v-if="!isView"
+            v-model:value="showDeprecated"
+            class="mt-5"
+            label="Show deprecated patch versions"
+            :mode="mode"
+          />
+        </template>
         <LabeledInput
+          v-else
           v-model:value="value.spec.version"
           label="K3s version"
           placeholder="Blank = host version. e.g. v1.36.5-k3s1 ('+' is converted to '-')"

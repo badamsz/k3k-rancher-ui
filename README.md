@@ -9,7 +9,9 @@ k3k CRDs installed (for example a Harvester host running the k3k operator).
 ## Features
 
 - List k3k `Cluster`, `VirtualClusterPolicy` and `ETCDSnapshot` resources, with status from `.status.phase`
-- Create / edit form for clusters: mode (shared / virtual), servers, agents, K3s version,
+- K3s version picker listing the releases your Rancher supports (same list as Cluster
+  Management), or "match host cluster"
+- Create / edit form for clusters: mode (shared / virtual), servers, agents,
   persistence (storage class + size) and API exposure (LoadBalancer / NodePort / Ingress)
 - **Download KubeConfig** action, reading the admin kubeconfig Secret k3k writes for each cluster
 - Full YAML create/edit for anything the form doesn't cover
@@ -63,6 +65,10 @@ cluster name; it defaults to the k3k cluster name). The extension then:
    `cattle-cluster-agent` itself and registers with Rancher
 4. Annotates the k3k Cluster with `k3k-rancher-ui.badamsz.github.io/rancher-cluster`
    so the two stay linked
+5. Sets `rancher.io/imported-cluster-version-management: "false"` on the Rancher cluster.
+   Rancher upgrades imported K3s clusters with system-upgrade-controller on each node,
+   which doesn't apply to k3k's pod-based servers; change the version from the k3k
+   cluster's edit form instead
 
 For a cluster that already exists, use the **Import into Rancher** row action. Adding
 the addon makes k3k roll the server StatefulSet, so the action is only offered for

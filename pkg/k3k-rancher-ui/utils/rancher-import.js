@@ -1,4 +1,4 @@
-import { CAPI, NORMAN, SECRET } from '@shell/config/types';
+import { CAPI, MANAGEMENT, NORMAN, SECRET } from '@shell/config/types';
 import { base64Encode } from '@shell/utils/crypto';
 
 export const FLEET_WORKSPACE = 'fleet-default';
@@ -11,6 +11,10 @@ export const ANNOTATIONS = {
 };
 
 const MANIFEST_KEY = 'rancher-import.yaml';
+
+// Rancher's per-cluster switch for managing an imported K3s/RKE2 cluster's version
+// (values: true | false | system-default). Validated on the management cluster.
+export const VERSION_MANAGEMENT_ANNOTATION = 'rancher.io/imported-cluster-version-management';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -116,6 +120,39 @@ export async function waitForRegistrationToken(dispatch, provCluster, timeoutMs 
 }
 
 /**
+ * Turn off Rancher's version management for the imported cluster. Rancher upgrades
+ * imported K3s clusters with system-upgrade-controller, which replaces the k3s binary
+ * on each node; k3k's servers are pods it manages itself, so the version is changed
+ * from the k3k Cluster (spec.version) instead.
+ */
+export async function disableRancherVersionManagement(dispatch, mgmtId) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mgmt = await dispatch('management/find', {
+      type: MANAGEMENT.CLUSTER, id: mgmtId, opt: { force: true }
+    });
+
+    if (mgmt.metadata?.annotations?.[VERSION_MANAGEMENT_ANNOTATION] === 'false') {
+      return;
+    }
+
+    mgmt.metadata.annotations = mgmt.metadata.annotations || {};
+    mgmt.metadata.annotations[VERSION_MANAGEMENT_ANNOTATION] = 'false';
+
+    try {
+      await mgmt.save();
+
+      return;
+    } catch (err) {
+      // Rancher updates the cluster object a lot right after creation; retry on conflict
+      if ((err?._status || err?.status) !== 409 || attempt === 2) {
+        throw err;
+      }
+      await sleep(1000);
+    }
+  }
+}
+
+/**
  * Create an "Imported" cluster in Rancher and fetch its registration manifest.
  *
  * @param {Function} dispatch root-level store dispatch: (action, payload) => Promise
@@ -145,6 +182,13 @@ export async function createRancherClusterAndManifest(dispatch, {
   try {
     const manifest = await step('step 2/3 (fetch registration manifest)', async() => {
       const token = await waitForRegistrationToken(dispatch, saved);
+
+      try {
+        await disableRancherVersionManagement(dispatch, token.clusterId);
+      } catch (err) {
+        // Not fatal: the import still works, the user can switch it off in Cluster Management
+        console.warn(`[k3k-rancher-ui] could not disable Rancher version management on ${ token.clusterId }`, err); // eslint-disable-line no-console
+      }
 
       // The manifestUrl uses Rancher's server-url setting, which may not be the
       // origin we're browsing on. The import endpoint is the same path on any origin.
