@@ -12,6 +12,26 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
+    appVersion: 0.3.0
+    created: "2026-11-01T03:06:06.811618316Z"
+    description: Create and manage k3k virtual clusters from the Rancher UI
+    digest: d635d0115625926f41d74a140dd02e651aac5193148c68ede5421ad047813c4d
+    name: k3k-rancher-ui
+    type: application
+    urls:
+    - assets/k3k-rancher-ui/k3k-rancher-ui-0.3.0.tgz
+    version: 0.3.0
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: k3k Virtual Clusters
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
     appVersion: 0.2.2
     created: "2026-11-01T02:36:59.185531069Z"
     description: Create and manage k3k virtual clusters from the Rancher UI
@@ -61,4 +81,4 @@ entries:
     urls:
     - assets/k3k-rancher-ui/k3k-rancher-ui-0.2.0.tgz
     version: 0.2.0
-generated: "2026-11-01T02:36:59.185219066Z"
+generated: "2026-11-01T03:06:06.811332094Z"
