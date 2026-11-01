@@ -126,29 +126,40 @@ export async function waitForRegistrationToken(dispatch, provCluster, timeoutMs 
  * from the k3k Cluster (spec.version) instead.
  */
 export async function disableRancherVersionManagement(dispatch, mgmtId) {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const readBack = async() => {
     const mgmt = await dispatch('management/find', {
       type: MANAGEMENT.CLUSTER, id: mgmtId, opt: { force: true }
     });
 
-    if (mgmt.metadata?.annotations?.[VERSION_MANAGEMENT_ANNOTATION] === 'false') {
+    return mgmt?.metadata?.annotations?.[VERSION_MANAGEMENT_ANNOTATION];
+  };
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (await readBack() === 'false') {
       return;
     }
-
-    mgmt.metadata.annotations = mgmt.metadata.annotations || {};
-    mgmt.metadata.annotations[VERSION_MANAGEMENT_ANNOTATION] = 'false';
 
     try {
-      await mgmt.save();
+      // Same path Rancher's own "Edit Config" page uses: the Norman (v3) cluster object
+      const norman = await dispatch('rancher/find', {
+        type: NORMAN.CLUSTER, id: mgmtId, opt: { force: true }
+      });
 
-      return;
+      norman.annotations = norman.annotations || {};
+      norman.annotations[VERSION_MANAGEMENT_ANNOTATION] = 'false';
+      await norman.save();
     } catch (err) {
-      // Rancher updates the cluster object a lot right after creation; retry on conflict
-      if ((err?._status || err?.status) !== 409 || attempt === 2) {
+      // Rancher updates a new cluster object a lot right after creation; retry on conflict
+      if ((err?._status || err?.status) !== 409) {
         throw err;
       }
-      await sleep(1000);
     }
+
+    await sleep(2000);
+  }
+
+  if (await readBack() !== 'false') {
+    throw new Error(`${ VERSION_MANAGEMENT_ANNOTATION } did not stick on ${ mgmtId }`);
   }
 }
 
@@ -186,8 +197,14 @@ export async function createRancherClusterAndManifest(dispatch, {
       try {
         await disableRancherVersionManagement(dispatch, token.clusterId);
       } catch (err) {
-        // Not fatal: the import still works, the user can switch it off in Cluster Management
+        // Not fatal for the import itself, but the user must know: in shared mode Rancher's
+        // upgrade plans would target the real host nodes
         console.warn(`[k3k-rancher-ui] could not disable Rancher version management on ${ token.clusterId }`, err); // eslint-disable-line no-console
+        dispatch('growl/warning', {
+          title:   'Rancher version management is still enabled',
+          message: `Use the "Disable Rancher Version Management" action on this cluster, or set it to Disabled in Cluster Management. (${ describeError(err) })`,
+          timeout: 0,
+        }).catch(() => {});
       }
 
       // The manifestUrl uses Rancher's server-url setting, which may not be the
