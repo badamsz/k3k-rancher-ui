@@ -68,7 +68,9 @@ cluster name; it defaults to the k3k cluster name). The extension then:
 5. Sets `rancher.io/imported-cluster-version-management: "false"` on the Rancher cluster.
    Rancher upgrades imported K3s clusters with system-upgrade-controller on each node,
    which doesn't apply to k3k's pod-based servers; change the version from the k3k
-   cluster's edit form instead
+   cluster's edit form instead. **This matters in shared mode:** virtual nodes mirror the
+   host nodes, so upgrade jobs would be scheduled onto the real host. Clusters imported
+   before 0.3.0 can be fixed with the **Disable Rancher Version Management** row action
 
 For a cluster that already exists, use the **Import into Rancher** row action. Adding
 the addon makes k3k roll the server StatefulSet, so the action is only offered for

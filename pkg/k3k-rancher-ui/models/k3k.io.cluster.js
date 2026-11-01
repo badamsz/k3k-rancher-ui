@@ -4,7 +4,7 @@ import { base64Decode } from '@shell/utils/crypto';
 import { downloadFile } from '@shell/utils/download';
 import { insertAt } from '@shell/utils/array';
 import {
-  ANNOTATIONS, defaultRancherName, findRancherCluster, importSecretName, prepareRancherImport
+  ANNOTATIONS, defaultRancherName, disableRancherVersionManagement, findRancherCluster, importSecretName, prepareRancherImport
 } from '../utils/rancher-import';
 
 const KUBECONFIG_KEY = 'kubeconfig.yaml';
@@ -82,7 +82,14 @@ export default class K3kCluster extends SteveModel {
       enabled: this.isImported,
     });
 
-    insertAt(out, 3, { divider: true });
+    insertAt(out, 3, {
+      action:  'disableRancherVersionManagement',
+      label:   'Disable Rancher Version Management',
+      icon:    'icon icon-lock',
+      enabled: this.isImported,
+    });
+
+    insertAt(out, 4, { divider: true });
 
     return out;
   }
@@ -106,6 +113,31 @@ export default class K3kCluster extends SteveModel {
     } catch (err) {
       this.$dispatch('growl/error', {
         title:   'Import into Rancher failed',
+        message: err?.message || String(err),
+      }, { root: true });
+    }
+  }
+
+  // For clusters imported before 0.3.0: stop Rancher from running system-upgrade-controller
+  // plans in the virtual cluster (in shared mode those jobs target the real host nodes)
+  async disableRancherVersionManagement() {
+    try {
+      const prov = await findRancherCluster(this.rootDispatch, this.rancherClusterRef);
+      const mgmtId = prov?.status?.clusterName;
+
+      if (!mgmtId) {
+        throw new Error(`Rancher cluster ${ this.rancherClusterRef } not found`);
+      }
+
+      await disableRancherVersionManagement(this.rootDispatch, mgmtId);
+
+      this.$dispatch('growl/success', {
+        title:   'Rancher version management disabled',
+        message: `Rancher will remove system-upgrade-controller and its plans from ${ this.metadata.name }.`,
+      }, { root: true });
+    } catch (err) {
+      this.$dispatch('growl/error', {
+        title:   'Could not disable Rancher version management',
         message: err?.message || String(err),
       }, { root: true });
     }
