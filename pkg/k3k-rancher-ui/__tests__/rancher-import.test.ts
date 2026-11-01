@@ -31,3 +31,33 @@ describe('describeError', () => {
     expect(describeError('plain')).toBe('plain');
   });
 });
+
+describe('waitForRegistrationToken', () => {
+  const { waitForRegistrationToken } = jest.requireActual('../utils/rancher-import');
+  const prov = { metadata: { namespace: 'fleet-default', name: 'vc' }, status: {} };
+
+  it('polls until the mgmt cluster ID and token appear', async() => {
+    let finds = 0;
+    const dispatch = jest.fn(async(action: string) => {
+      if (action === 'management/find') {
+        finds++;
+
+        return { status: finds >= 2 ? { clusterName: 'c-abc' } : {} };
+      }
+      if (action === 'rancher/findAll') {
+        return [{ clusterId: 'c-other', manifestUrl: 'x' }, { clusterId: 'c-abc', manifestUrl: 'https://r/v3/import/t_c-abc.yaml' }];
+      }
+    });
+
+    const token = await waitForRegistrationToken(dispatch, prov, 1000, 1);
+
+    expect(token.manifestUrl).toBe('https://r/v3/import/t_c-abc.yaml');
+    expect(finds).toBe(2);
+  });
+
+  it('times out with a clear message when no ID is assigned', async() => {
+    const dispatch = jest.fn(async() => ({ status: {} }));
+
+    await expect(waitForRegistrationToken(dispatch, prov, 20, 1)).rejects.toThrow('did not assign a management cluster ID');
+  });
+});

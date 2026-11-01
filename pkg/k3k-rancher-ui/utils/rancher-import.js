@@ -1,4 +1,4 @@
-import { CAPI, SECRET } from '@shell/config/types';
+import { CAPI, NORMAN, SECRET } from '@shell/config/types';
 import { base64Encode } from '@shell/utils/crypto';
 
 export const FLEET_WORKSPACE = 'fleet-default';
@@ -67,6 +67,55 @@ export function defaultRancherName(k3kName) {
 }
 
 /**
+ * Wait for Rancher to assign the management cluster ID (status.clusterName) and
+ * produce a registration token with a manifest URL.
+ *
+ * Polls the API with force:true rather than relying on the in-memory model
+ * (as Rancher's own waitForMgmt/getOrCreateToken do): with server-side pagination
+ * enabled the UI doesn't watch provisioning clusters, so that copy never updates.
+ */
+export async function waitForRegistrationToken(dispatch, provCluster, timeoutMs = 120000, intervalMs = 2000) {
+  const id = `${ provCluster.metadata.namespace }/${ provCluster.metadata.name }`;
+  const deadline = Date.now() + timeoutMs;
+  let mgmtId = provCluster.status?.clusterName;
+  let created = false;
+
+  while (Date.now() < deadline) {
+    if (!mgmtId) {
+      const fresh = await dispatch('management/find', {
+        type: CAPI.RANCHER_CLUSTER, id, opt: { force: true }
+      });
+
+      mgmtId = fresh?.status?.clusterName;
+    }
+
+    if (mgmtId) {
+      const tokens = await dispatch('rancher/findAll', { type: NORMAN.CLUSTER_TOKEN, opt: { force: true } });
+      const token = (tokens || []).find((t) => t.clusterId === mgmtId);
+
+      if (token?.manifestUrl) {
+        return token;
+      }
+
+      // Rancher normally creates a default token for imported clusters; make one if it hasn't
+      if (!token && !created) {
+        created = true;
+
+        try {
+          const neu = await dispatch('rancher/create', { type: NORMAN.CLUSTER_TOKEN, clusterId: mgmtId });
+
+          await neu.save();
+        } catch (e) {}
+      }
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error(mgmtId ? `Rancher cluster ${ mgmtId } has no registration token after ${ timeoutMs / 1000 }s` : `Rancher did not assign a management cluster ID to ${ id } within ${ timeoutMs / 1000 }s`);
+}
+
+/**
  * Create an "Imported" cluster in Rancher and fetch its registration manifest.
  *
  * @param {Function} dispatch root-level store dispatch: (action, payload) => Promise
@@ -95,20 +144,7 @@ export async function createRancherClusterAndManifest(dispatch, {
 
   try {
     const manifest = await step('step 2/3 (fetch registration manifest)', async() => {
-      // Rancher creates the management cluster + registration token asynchronously
-      let token;
-
-      for (let i = 0; i < 30 && !token?.manifestUrl; i++) {
-        token = await saved.getOrCreateToken();
-
-        if (!token?.manifestUrl) {
-          await sleep(2000);
-        }
-      }
-
-      if (!token?.manifestUrl) {
-        throw new Error('Rancher did not produce a registration token/manifest URL within 60s');
-      }
+      const token = await waitForRegistrationToken(dispatch, saved);
 
       // The manifestUrl uses Rancher's server-url setting, which may not be the
       // origin we're browsing on. The import endpoint is the same path on any origin.
@@ -202,7 +238,9 @@ export async function findRancherCluster(dispatch, ref) {
   }
 
   try {
-    return await dispatch('management/find', { type: CAPI.RANCHER_CLUSTER, id: ref });
+    return await dispatch('management/find', {
+      type: CAPI.RANCHER_CLUSTER, id: ref, opt: { force: true }
+    });
   } catch (e) {
     return null;
   }
