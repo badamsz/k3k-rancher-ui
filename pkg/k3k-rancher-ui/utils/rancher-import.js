@@ -14,6 +14,40 @@ const MANIFEST_KEY = 'rancher-import.yaml';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Rancher store errors are often plain objects (e.g. { _status, message, code })
+export function describeError(err) {
+  if (!err) {
+    return 'unknown error';
+  }
+  if (typeof err === 'string') {
+    return err;
+  }
+
+  const status = err._status || err.status;
+  const msg = err.message || err._statusText || err.statusText || err.code;
+
+  if (msg) {
+    return status ? `${ msg } (HTTP ${ status })` : msg;
+  }
+
+  try {
+    return JSON.stringify(err);
+  } catch (e) {
+    return String(err);
+  }
+}
+
+// Run one step of the import, labelling any failure with the step it happened in
+async function step(label, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error(`[k3k-rancher-ui] ${ label } failed`, err); // eslint-disable-line no-console
+
+    throw new Error(`Import into Rancher, ${ label }: ${ describeError(err) }`);
+  }
+}
+
 // Kubernetes object names: lowercase alphanumerics and '-', max 63 chars
 export function safeName(...parts) {
   return parts.filter(Boolean).join('-')
@@ -42,47 +76,51 @@ export function defaultRancherName(k3kName) {
 export async function createRancherClusterAndManifest(dispatch, {
   rancherName, hostClusterId, k3kNamespace, k3kName
 }) {
-  const provCluster = await dispatch('management/create', {
-    type:     CAPI.RANCHER_CLUSTER,
-    metadata: {
-      name:        rancherName,
-      namespace:   FLEET_WORKSPACE,
-      annotations: {
-        [ANNOTATIONS.HOST_CLUSTER]: hostClusterId,
-        [ANNOTATIONS.K3K_CLUSTER]:  `${ k3kNamespace }/${ k3kName }`,
+  const saved = await step(`step 1/3 (create Rancher cluster ${ FLEET_WORKSPACE }/${ rancherName })`, async() => {
+    const provCluster = await dispatch('management/create', {
+      type:     CAPI.RANCHER_CLUSTER,
+      metadata: {
+        name:        rancherName,
+        namespace:   FLEET_WORKSPACE,
+        annotations: {
+          [ANNOTATIONS.HOST_CLUSTER]: hostClusterId,
+          [ANNOTATIONS.K3K_CLUSTER]:  `${ k3kNamespace }/${ k3kName }`,
+        },
       },
-    },
-    spec: {},
+      spec: {},
+    });
+
+    return provCluster.save();
   });
 
-  const saved = await provCluster.save();
-
   try {
-    // Rancher creates the management cluster + registration token asynchronously
-    let token;
+    const manifest = await step('step 2/3 (fetch registration manifest)', async() => {
+      // Rancher creates the management cluster + registration token asynchronously
+      let token;
 
-    for (let i = 0; i < 30 && !token?.manifestUrl; i++) {
-      token = await saved.getOrCreateToken();
+      for (let i = 0; i < 30 && !token?.manifestUrl; i++) {
+        token = await saved.getOrCreateToken();
+
+        if (!token?.manifestUrl) {
+          await sleep(2000);
+        }
+      }
 
       if (!token?.manifestUrl) {
-        await sleep(2000);
+        throw new Error('Rancher did not produce a registration token/manifest URL within 60s');
       }
-    }
 
-    if (!token?.manifestUrl) {
-      throw new Error('Rancher did not produce a registration manifest in time');
-    }
+      // The manifestUrl uses Rancher's server-url setting, which may not be the
+      // origin we're browsing on. The import endpoint is the same path on any origin.
+      const path = new URL(token.manifestUrl, window.location.origin).pathname;
+      const res = await fetch(path, { credentials: 'same-origin' });
 
-    // The manifestUrl uses Rancher's server-url setting, which may not be the
-    // origin we're browsing on. The import endpoint is the same path on any origin.
-    const path = new URL(token.manifestUrl, window.location.origin).pathname;
-    const res = await fetch(path, { credentials: 'same-origin' });
+      if (!res.ok) {
+        throw new Error(`GET ${ path } returned HTTP ${ res.status }`);
+      }
 
-    if (!res.ok) {
-      throw new Error(`Fetching registration manifest failed: HTTP ${ res.status }`);
-    }
-
-    const manifest = await res.text();
+      return res.text();
+    });
 
     return { provCluster: saved, manifest };
   } catch (err) {
@@ -143,9 +181,9 @@ export async function prepareRancherImport(dispatch, k3kCluster, { rancherName, 
   });
 
   try {
-    const secretName = await createImportSecret(dispatch, {
+    const secretName = await step(`step 3/3 (create Secret ${ namespace }/${ importSecretName(k3kName) })`, () => createImportSecret(dispatch, {
       namespace, k3kName, manifest
-    });
+    }));
 
     addImportAddon(k3kCluster, secretName);
     k3kCluster.metadata.annotations = k3kCluster.metadata.annotations || {};

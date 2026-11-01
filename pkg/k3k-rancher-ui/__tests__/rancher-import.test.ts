@@ -21,3 +21,13 @@ describe('rancher import helpers', () => {
     expect(cluster.spec.addons).toStrictEqual([{ secretRef: 'other' }, { secretRef: 'rancher-import-x' }]);
   });
 });
+
+describe('describeError', () => {
+  it('formats Rancher store error objects', () => {
+    const { describeError } = jest.requireActual('../utils/rancher-import');
+
+    expect(describeError({ _status: 403, message: 'forbidden' })).toBe('forbidden (HTTP 403)');
+    expect(describeError(new Error('boom'))).toBe('boom');
+    expect(describeError('plain')).toBe('plain');
+  });
+});
