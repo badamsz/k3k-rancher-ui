@@ -1,7 +1,7 @@
 {
   "name": "k3k-rancher-ui",
   "description": "Create and manage k3k virtual clusters from the Rancher UI",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "rancher": {
     "annotations": {

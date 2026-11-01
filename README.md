@@ -13,10 +13,9 @@ k3k CRDs installed (for example a Harvester host running the k3k operator).
   persistence (storage class + size) and API exposure (LoadBalancer / NodePort / Ingress)
 - **Download KubeConfig** action, reading the admin kubeconfig Secret k3k writes for each cluster
 - Full YAML create/edit for anything the form doesn't cover
-- Delete clusters
-
-Not included (yet): automatic import of a virtual cluster into Rancher — see
-[Importing into Rancher](#importing-a-virtual-cluster-into-rancher).
+- **Automatic import into Rancher** when creating a cluster, or later via the
+  **Import into Rancher** action; **Open in Rancher** jumps to the imported cluster
+- Delete clusters (also removes the linked Rancher cluster and its import Secret)
 
 ## Requirements
 
@@ -53,13 +52,32 @@ pick an exposure type reachable from where you'll run `kubectl`.
 
 ## Importing a virtual cluster into Rancher
 
-1. Download the kubeconfig (above)
-2. Rancher → **Cluster Management** → **Import Existing** → **Generic**, give it a name, **Create**
-3. Run the registration command shown, against the virtual cluster:
+Leave **Import into Rancher** checked on the create form (optionally set the Rancher
+cluster name; it defaults to the k3k cluster name). The extension then:
 
-   ```bash
-   KUBECONFIG=./mycluster-kubeconfig.yaml kubectl apply -f https://<rancher>/v3/import/<token>.yaml
-   ```
+1. Creates an *Imported* cluster in Rancher (`fleet-default/<name>`) and fetches its
+   registration manifest
+2. Stores the manifest in a Secret `rancher-import-<k3k-name>` next to the k3k Cluster
+3. Adds that Secret to the Cluster's `spec.addons`; k3k mounts addons into the k3s
+   server's auto-deploy manifests directory, so the virtual cluster installs
+   `cattle-cluster-agent` itself and registers with Rancher
+4. Annotates the k3k Cluster with `k3k-rancher-ui.badamsz.github.io/rancher-cluster`
+   so the two stay linked
+
+For a cluster that already exists, use the **Import into Rancher** row action. Adding
+the addon makes k3k roll the server StatefulSet, so the action is only offered for
+`Ready` clusters with **dynamic** persistence (an ephemeral cluster would lose its data
+on the restart).
+
+Requirements:
+
+- Pods in the virtual cluster must be able to resolve and reach Rancher's **server-url**
+  (Global Settings → `server-url`)
+- If Rancher uses a private CA, the registration manifest already carries the CA checksum;
+  nothing else to configure
+
+Manual alternative: download the kubeconfig, then Rancher → Cluster Management →
+Import Existing → Generic, and apply the registration command against the virtual cluster.
 
 ## Development
 
@@ -77,7 +95,8 @@ Code lives in `pkg/k3k-rancher-ui/`:
 | Path | Purpose |
 | --- | --- |
 | `product.ts` | Registers the Virtual Clusters product and its resource types |
-| `models/k3k.io.cluster.js` | State badge from `.status.phase`, Download KubeConfig action |
+| `models/k3k.io.cluster.js` | State badge, Download KubeConfig / Import into Rancher / Open in Rancher actions, linked delete |
+| `utils/rancher-import.js` | Creates the Rancher cluster, fetches the manifest, writes the addon Secret |
 | `edit/k3k.io.cluster.vue` | Create / edit form |
 | `types.ts` | Resource type IDs and option lists |
 

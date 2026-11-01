@@ -1,0 +1,171 @@
+import { CAPI, SECRET } from '@shell/config/types';
+import { base64Encode } from '@shell/utils/crypto';
+
+export const FLEET_WORKSPACE = 'fleet-default';
+
+// Annotations linking the k3k Cluster and the Rancher cluster to each other
+export const ANNOTATIONS = {
+  RANCHER_CLUSTER: 'k3k-rancher-ui.badamsz.github.io/rancher-cluster',
+  HOST_CLUSTER:    'k3k-rancher-ui.badamsz.github.io/host-cluster',
+  K3K_CLUSTER:     'k3k-rancher-ui.badamsz.github.io/k3k-cluster',
+};
+
+const MANIFEST_KEY = 'rancher-import.yaml';
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Kubernetes object names: lowercase alphanumerics and '-', max 63 chars
+export function safeName(...parts) {
+  return parts.filter(Boolean).join('-')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 63)
+    .replace(/^-+|-+$/g, '');
+}
+
+export function importSecretName(k3kName) {
+  return safeName('rancher-import', k3kName);
+}
+
+export function defaultRancherName(k3kName) {
+  return safeName(k3kName);
+}
+
+/**
+ * Create an "Imported" cluster in Rancher and fetch its registration manifest.
+ *
+ * @param {Function} dispatch root-level store dispatch: (action, payload) => Promise
+ * @param {object}   opts { rancherName, hostClusterId, k3kNamespace, k3kName }
+ * @returns {{ provCluster, manifest }}
+ */
+export async function createRancherClusterAndManifest(dispatch, {
+  rancherName, hostClusterId, k3kNamespace, k3kName
+}) {
+  const provCluster = await dispatch('management/create', {
+    type:     CAPI.RANCHER_CLUSTER,
+    metadata: {
+      name:        rancherName,
+      namespace:   FLEET_WORKSPACE,
+      annotations: {
+        [ANNOTATIONS.HOST_CLUSTER]: hostClusterId,
+        [ANNOTATIONS.K3K_CLUSTER]:  `${ k3kNamespace }/${ k3kName }`,
+      },
+    },
+    spec: {},
+  });
+
+  const saved = await provCluster.save();
+
+  try {
+    // Rancher creates the management cluster + registration token asynchronously
+    let token;
+
+    for (let i = 0; i < 30 && !token?.manifestUrl; i++) {
+      token = await saved.getOrCreateToken();
+
+      if (!token?.manifestUrl) {
+        await sleep(2000);
+      }
+    }
+
+    if (!token?.manifestUrl) {
+      throw new Error('Rancher did not produce a registration manifest in time');
+    }
+
+    // The manifestUrl uses Rancher's server-url setting, which may not be the
+    // origin we're browsing on. The import endpoint is the same path on any origin.
+    const path = new URL(token.manifestUrl, window.location.origin).pathname;
+    const res = await fetch(path, { credentials: 'same-origin' });
+
+    if (!res.ok) {
+      throw new Error(`Fetching registration manifest failed: HTTP ${ res.status }`);
+    }
+
+    const manifest = await res.text();
+
+    return { provCluster: saved, manifest };
+  } catch (err) {
+    // Don't leave an orphaned "pending" cluster behind in Rancher
+    await saved.remove().catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Store the registration manifest as a Secret next to the k3k Cluster.
+ * k3k mounts addon Secrets into the k3s server's auto-deploy manifests dir,
+ * so the virtual cluster applies cattle-cluster-agent itself and registers.
+ */
+export async function createImportSecret(dispatch, { namespace, k3kName, manifest }) {
+  const name = importSecretName(k3kName);
+
+  // Replace a stale secret from an earlier attempt
+  try {
+    const existing = await dispatch('cluster/find', { type: SECRET, id: `${ namespace }/${ name }` });
+
+    await existing.remove();
+  } catch (e) {}
+
+  const secret = await dispatch('cluster/create', {
+    type:     SECRET,
+    _type:    'Opaque',
+    metadata: {
+      name,
+      namespace,
+      labels: { 'app.kubernetes.io/managed-by': 'k3k-rancher-ui' },
+    },
+    data: { [MANIFEST_KEY]: base64Encode(manifest) },
+  });
+
+  await secret.save();
+
+  return name;
+}
+
+export function addImportAddon(k3kCluster, secretName) {
+  const addons = (k3kCluster.spec.addons || []).filter((a) => a.secretRef !== secretName);
+
+  addons.push({ secretRef: secretName });
+  k3kCluster.spec.addons = addons;
+}
+
+/**
+ * Full flow: Rancher cluster -> manifest -> Secret -> addon + link annotation on the k3k Cluster.
+ * Mutates k3kCluster but does not save it.
+ */
+export async function prepareRancherImport(dispatch, k3kCluster, { rancherName, hostClusterId }) {
+  const namespace = k3kCluster.metadata.namespace;
+  const k3kName = k3kCluster.metadata.name;
+
+  const { provCluster, manifest } = await createRancherClusterAndManifest(dispatch, {
+    rancherName, hostClusterId, k3kNamespace: namespace, k3kName
+  });
+
+  try {
+    const secretName = await createImportSecret(dispatch, {
+      namespace, k3kName, manifest
+    });
+
+    addImportAddon(k3kCluster, secretName);
+    k3kCluster.metadata.annotations = k3kCluster.metadata.annotations || {};
+    k3kCluster.metadata.annotations[ANNOTATIONS.RANCHER_CLUSTER] = `${ FLEET_WORKSPACE }/${ provCluster.metadata.name }`;
+
+    return provCluster;
+  } catch (err) {
+    await provCluster.remove().catch(() => {});
+    throw err;
+  }
+}
+
+export async function findRancherCluster(dispatch, ref) {
+  if (!ref) {
+    return null;
+  }
+
+  try {
+    return await dispatch('management/find', { type: CAPI.RANCHER_CLUSTER, id: ref });
+  } catch (e) {
+    return null;
+  }
+}

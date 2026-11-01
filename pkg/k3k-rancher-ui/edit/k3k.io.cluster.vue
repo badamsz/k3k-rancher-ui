@@ -6,15 +6,18 @@ import LabeledSelect from '@shell/components/form/LabeledSelect';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import { RadioGroup } from '@components/Form/Radio';
 import { Banner } from '@components/Banner';
+import { Checkbox } from '@components/Form/Checkbox';
 import { STORAGE_CLASS } from '@shell/config/types';
 import { MODES, PERSISTENCE_TYPES, EXPOSE_TYPES } from '../types';
+import impl from '@shell/mixins/create-edit-view/impl';
+import { ANNOTATIONS, defaultRancherName, prepareRancherImport } from '../utils/rancher-import';
 
 export default {
   name:         'EditK3kCluster',
   inheritAttrs: false,
 
   components: {
-    CruResource, NameNsDescription, LabeledSelect, LabeledInput, RadioGroup, Banner
+    CruResource, NameNsDescription, LabeledSelect, LabeledInput, RadioGroup, Banner, Checkbox
   },
 
   mixins: [CreateEditView],
@@ -49,6 +52,9 @@ export default {
     }
 
     return {
+      importIntoRancher:  this.mode === 'create',
+      rancherName:        '',
+      createdProvCluster: null,
       storageClasses:     [],
       exposeType,
       modeOptions:        MODES,
@@ -57,7 +63,20 @@ export default {
     };
   },
 
+  created() {
+    // Run after NameNsDescription's hooks (which may create the namespace)
+    this.registerBeforeHook(this.doRancherImport, 'rancherImport', 200);
+  },
+
   computed: {
+    linkedRancherCluster() {
+      return this.value.metadata?.annotations?.[ANNOTATIONS.RANCHER_CLUSTER];
+    },
+
+    rancherNamePlaceholder() {
+      return defaultRancherName(this.value.metadata?.name) || 'Defaults to the cluster name';
+    },
+
     isVirtual() {
       return this.value.spec.mode === 'virtual';
     },
@@ -84,6 +103,33 @@ export default {
   },
 
   methods: {
+    async doRancherImport() {
+      if (!this.isCreate || !this.importIntoRancher) {
+        return;
+      }
+
+      const rancherName = defaultRancherName(this.rancherName || this.value.metadata.name);
+
+      this.createdProvCluster = await prepareRancherImport(
+        (action, payload) => this.$store.dispatch(action, payload),
+        this.value,
+        { rancherName, hostClusterId: this.$store.getters['currentCluster']?.id }
+      );
+    },
+
+    // If creating the k3k Cluster fails, remove the Rancher cluster we just made
+    async actuallySave(url) {
+      try {
+        return await impl.methods.actuallySave.call(this, url);
+      } catch (err) {
+        if (this.createdProvCluster) {
+          await this.createdProvCluster.remove().catch(() => {});
+          this.createdProvCluster = null;
+        }
+        throw err;
+      }
+    },
+
     setInt(field, val) {
       const n = parseInt(val, 10);
 
@@ -238,5 +284,42 @@ export default {
         />
       </div>
     </div>
+
+    <h3>Rancher</h3>
+    <div
+      v-if="isCreate"
+      class="row mb-20"
+    >
+      <div class="col span-4">
+        <Checkbox
+          v-model:value="importIntoRancher"
+          label="Import into Rancher"
+          :mode="mode"
+        />
+      </div>
+      <div
+        v-if="importIntoRancher"
+        class="col span-6"
+      >
+        <LabeledInput
+          v-model:value="rancherName"
+          label="Rancher cluster name"
+          :placeholder="rancherNamePlaceholder"
+          :mode="mode"
+        />
+      </div>
+    </div>
+    <p
+      v-else-if="linkedRancherCluster"
+      class="mb-20"
+    >
+      Imported into Rancher as <code>{{ linkedRancherCluster }}</code>.
+    </p>
+    <p
+      v-else
+      class="mb-20 text-muted"
+    >
+      Not imported. Use the <b>Import into Rancher</b> action on the cluster list.
+    </p>
   </CruResource>
 </template>
