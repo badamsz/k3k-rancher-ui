@@ -8,7 +8,9 @@ import { RadioGroup } from '@components/Form/Radio';
 import { Banner } from '@components/Banner';
 import { Checkbox } from '@components/Form/Checkbox';
 import { STORAGE_CLASS } from '@shell/config/types';
-import { MODES, PERSISTENCE_TYPES, EXPOSE_TYPES } from '../types';
+import {
+  MODES, PERSISTENCE_TYPES, EXPOSE_TYPES, K3S_IMAGE_TAG, normalizeK3sVersion
+} from '../types';
 import impl from '@shell/mixins/create-edit-view/impl';
 import { ANNOTATIONS, defaultRancherName, prepareRancherImport } from '../utils/rancher-import';
 
@@ -64,6 +66,7 @@ export default {
   },
 
   created() {
+    this.registerBeforeHook(this.normalizeVersion, 'normalizeVersion', 100);
     // Run after NameNsDescription's hooks (which may create the namespace)
     this.registerBeforeHook(this.doRancherImport, 'rancherImport', 200);
   },
@@ -103,6 +106,23 @@ export default {
   },
 
   methods: {
+    // k3k uses spec.version as the image tag; "+" (as in K3s release names) is invalid there
+    normalizeVersion() {
+      const v = normalizeK3sVersion(this.value.spec.version);
+
+      if (!v) {
+        delete this.value.spec.version;
+
+        return;
+      }
+
+      if (!K3S_IMAGE_TAG.test(v)) {
+        throw new Error(`K3s version "${ this.value.spec.version }" is not a valid rancher/k3s image tag (expected e.g. v1.36.5-k3s1)`);
+      }
+
+      this.value.spec.version = v;
+    },
+
     async doRancherImport() {
       if (!this.isCreate || !this.importIntoRancher) {
         return;
@@ -220,7 +240,7 @@ export default {
         <LabeledInput
           v-model:value="value.spec.version"
           label="K3s version"
-          placeholder="Defaults to the host cluster version, e.g. v1.33.4-k3s1"
+          placeholder="Blank = host version. e.g. v1.36.5-k3s1 ('+' is converted to '-')"
           :mode="mode"
         />
       </div>
