@@ -1,0 +1,15 @@
+nameOverride: ""
+fullnameOverride: ""
+plugin:
+  enabled: true
+  versionOverride: ""
+  endpoint: >-
+    https://raw.githubusercontent.com/badamsz/k3k-rancher-ui/gh-pages/extensions/k3k-rancher-ui/0.3.2
+  compressedEndpoint: >-
+    https://raw.githubusercontent.com/badamsz/k3k-rancher-ui/gh-pages/extensions/k3k-rancher-ui/0.3.2.tgz
+  noCache: false
+  noAuth: false
+  metadata:
+    catalog.cattle.io/rancher-version: ">= 2.10.0"
+    catalog.cattle.io/ui-extensions-version: ">= 3.0.0 < 4.0.0"
+    catalog.cattle.io/display-name: k3k Virtual Clusters

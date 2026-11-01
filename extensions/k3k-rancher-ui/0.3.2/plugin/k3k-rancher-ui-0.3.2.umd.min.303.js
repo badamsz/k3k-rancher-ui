@@ -1,0 +1,2 @@
+"use strict";(("undefined"!==typeof self?self:this)["webpackChunkk3k_rancher_ui_0_3_2"]=("undefined"!==typeof self?self:this)["webpackChunkk3k_rancher_ui_0_3_2"]||[]).push([[303],{66303:function(e,n,r){r.r(n),r.d(n,{default:function(){return f}});var t=r(9274);function o(e,n,r,o,u,c){const s=(0,t.resolveComponent)("ResourceDetail");return(0,t.openBlock)(),(0,t.createBlock)(s)}var u=r(81608),c={name:"ClusterResourcedId",components:{ResourceDetail:u.A}},s=r(47433);const a=(0,s.A)(c,[["render",o]]);var f=a}}]);
+//# sourceMappingURL=k3k-rancher-ui-0.3.2.umd.min.303.js.map
