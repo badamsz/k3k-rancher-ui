@@ -87,6 +87,25 @@ Requirements:
 Manual alternative: download the kubeconfig, then Rancher → Cluster Management →
 Import Existing → Generic, and apply the registration command against the virtual cluster.
 
+## Known issues
+
+### Rancher's Kubectl Shell doesn't start on shared-mode clusters
+
+Upstream: [rancher/k3k#168](https://github.com/rancher/k3k/issues/168) (open, no fix yet).
+
+When a **shared-mode** virtual cluster is imported into Rancher, **Kubectl Shell** on the
+imported cluster never connects. Rancher's `dashboard-shell-*` pod in `cattle-system`
+stays in `ContainerCreating` or times out and disconnects because its `admin-kubeconfig` ConfigMap volume can't be synced. k3k's virtual-kubelet fails to create the host copy of the
+`impersonation-shell-admin-kubeconfig-*` ConfigMap, so the pod never gets the volume.
+
+The rest of the Rancher integration still works (cluster explorer, workloads, and so on).
+
+
+This extension can't fix the bug. Until upstream does, use one of these:
+
+- Use **Download KubeConfig** on the k3k cluster and run `kubectl` locally, or download the kubeconfig from the imported cluster in Rancher
+- Use **virtual** mode if you need the in-browser shell. The bug report covers shared mode only. See the privileged-pod caveat under [Usage](#usage) first
+
 ## Development
 
 Requires Node 24 and Yarn 1.

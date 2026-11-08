@@ -1,0 +1,72 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommitsDisabled"
+  ],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "rangeStrategy": "auto",
+  "major": {
+    "dependencyDashboardApproval": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Rancher shell: majors change the UI extensions API and the Rancher versions supported (see catalog.cattle.io annotations in pkg/k3k-rancher-ui/package.json)",
+      "matchPackageNames": ["@rancher/shell"],
+      "groupName": "rancher shell",
+      "labels": ["rancher-shell"]
+    },
+    {
+      "description": "Build and test toolchain from the Rancher extension skeleton: keep versions in step",
+      "matchPackageNames": [
+        "jest",
+        "jest-environment-jsdom",
+        "babel-jest",
+        "ts-jest",
+        "@types/jest",
+        "@vue/vue3-jest",
+        "@vue/test-utils",
+        "@vue/cli-service",
+        "@vue/cli-plugin-babel",
+        "@vue/cli-plugin-typescript",
+        "babel-plugin-transform-require-context"
+      ],
+      "groupName": "build and test toolchain"
+    },
+    {
+      "description": "Types pinned through resolutions to match @rancher/shell; update only when shell does",
+      "matchPackageNames": ["@types/node", "@types/lodash"],
+      "enabled": false
+    },
+    {
+      "description": "Group non-major npm updates",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchPackageNames": ["!@rancher/shell"],
+      "groupName": "npm non-major"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Rancher's reusable extension workflows are meant to be used from @master; don't pin or update them",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["rancher/dashboard"],
+      "enabled": false
+    },
+    {
+      "description": "Node major versions must match the engines field and Rancher's extension tooling",
+      "matchDepNames": ["node"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
