@@ -1,13 +1,17 @@
 import SteveModel from '@shell/plugins/steve/steve-class';
-import { SECRET } from '@shell/config/types';
+import { SECRET, POD, PVC } from '@shell/config/types';
 import { base64Decode } from '@shell/utils/crypto';
 import { downloadFile } from '@shell/utils/download';
 import { insertAt } from '@shell/utils/array';
 import {
   ANNOTATIONS, defaultRancherName, disableRancherVersionManagement, findRancherCluster, importSecretName, prepareRancherImport
 } from '../utils/rancher-import';
+import {
+  DEFAULT_STORAGE_SIZE, isStuckTerminating, serverPods, serverPvcs, validateExpansion, withoutEtcdFinalizer
+} from '../utils/server-health';
 
 const KUBECONFIG_KEY = 'kubeconfig.yaml';
+const MERGE_PATCH = { 'content-type': 'application/merge-patch+json' };
 
 export default class K3kCluster extends SteveModel {
   // Use the k3k-reported phase (Pending/Provisioning/Ready/Failed/...) as the badge state
@@ -91,7 +95,119 @@ export default class K3kCluster extends SteveModel {
 
     insertAt(out, 4, { divider: true });
 
+    // Recovery actions. Not gated on Ready: they're needed exactly when the cluster isn't.
+    insertAt(out, 5, {
+      action:  'releaseStuckServers',
+      label:   'Release Stuck Server Pods',
+      icon:    'icon icon-unlock',
+      enabled: !!this.links?.update,
+    });
+
+    insertAt(out, 6, {
+      action:  'expandServerVolumes',
+      label:   'Expand Server Volumes',
+      icon:    'icon icon-storage',
+      enabled: !!this.links?.update && this.spec?.persistence?.type !== 'ephemeral',
+    });
+
+    insertAt(out, 7, { divider: true });
+
     return out;
+  }
+
+  async findServerPods() {
+    const pods = await this.$dispatch('findAll', { type: POD, opt: { namespaced: this.metadata.namespace, force: true } });
+
+    return serverPods(pods, this);
+  }
+
+  async findServerPvcs() {
+    const pvcs = await this.$dispatch('findAll', { type: PVC, opt: { namespaced: this.metadata.namespace, force: true } });
+
+    return serverPvcs(pvcs, this);
+  }
+
+  async mergePatch(resource, data) {
+    return this.$dispatch('request', {
+      url: resource.linkFor('self'), method: 'PATCH', headers: MERGE_PATCH, data
+    });
+  }
+
+  // When every server goes down at once (e.g. a host node drain), k3k can't reach the
+  // virtual API to remove the deleted pods' etcd members, so their finalizer never
+  // clears and drains hang. Removing it lets the StatefulSet recreate the pods on the
+  // same volumes; the etcd membership is unchanged, which is what we want.
+  async releaseStuckServers() {
+    try {
+      const stuck = (await this.findServerPods()).filter((p) => isStuckTerminating(p));
+
+      if (!stuck.length) {
+        this.$dispatch('growl/info', {
+          title:   'Nothing to release',
+          message: `No ${ this.metadata.name } server pods are stuck terminating.`,
+        }, { root: true });
+
+        return;
+      }
+
+      const names = stuck.map((p) => p.metadata.name).join(', ');
+
+      // eslint-disable-next-line no-alert
+      if (!window.confirm(`Remove the k3k etcd finalizer from ${ names }?\n\nOnly do this when k3k can't (the virtual cluster API is down). The pods are already deleted and not running; the StatefulSet recreates them on the same volumes.`)) {
+        return;
+      }
+
+      for (const p of stuck) {
+        await this.mergePatch(p, { metadata: { finalizers: withoutEtcdFinalizer(p.metadata.finalizers) } });
+      }
+
+      this.$dispatch('growl/success', { title: 'Released stuck server pods', message: names }, { root: true });
+    } catch (err) {
+      this.$dispatch('growl/error', {
+        title:   'Could not release server pods',
+        message: err?.message || String(err),
+      }, { root: true });
+    }
+  }
+
+  // spec.persistence.storageRequestSize is immutable in k3k, so grow the existing
+  // PVCs directly (the storage class must allow expansion; Longhorn does it online).
+  async expandServerVolumes() {
+    try {
+      const pvcs = await this.findServerPvcs();
+
+      if (!pvcs.length) {
+        throw new Error('No server volumes found');
+      }
+
+      const current = pvcs.map((p) => `${ p.metadata.name }: ${ p.status?.capacity?.storage || p.spec?.resources?.requests?.storage }`).join('\n');
+      // eslint-disable-next-line no-alert
+      const size = window.prompt(`Expand all ${ pvcs.length } server volumes of ${ this.metadata.name } to (volumes can't be shrunk later):\n\n${ current }`, DEFAULT_STORAGE_SIZE);
+
+      if (!size) {
+        return;
+      }
+
+      const invalid = validateExpansion(size.trim(), pvcs);
+
+      if (invalid) {
+        throw new Error(invalid);
+      }
+
+      for (const p of pvcs) {
+        await this.mergePatch(p, { spec: { resources: { requests: { storage: size.trim() } } } });
+      }
+
+      this.$dispatch('growl/success', {
+        title:   'Expanding server volumes',
+        message: `${ pvcs.length } volumes requested at ${ size.trim() }. The filesystems grow online.`,
+      }, { root: true });
+    } catch (err) {
+      this.$dispatch('growl/error', {
+        title:   'Could not expand server volumes',
+        message: err?.message || String(err),
+      }, { root: true });
+    }
   }
 
   // Import a cluster that is already running. k3k rolls the server StatefulSet to

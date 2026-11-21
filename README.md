@@ -18,6 +18,9 @@ k3k CRDs installed (for example a Harvester host running the k3k operator).
 - **Automatic import into Rancher** when creating a cluster, or later via the
   **Import into Rancher** action; **Open in Rancher** jumps to the imported cluster
 - Delete clusters (also removes the linked Rancher cluster and its import Secret)
+- **Server health** panel on the cluster detail page: stuck etcd finalizers, lost quorum, servers sharing a host node, undersized volumes
+- **Spread servers across host nodes** option (pod anti-affinity via `spec.serverAffinity`)
+- **Release Stuck Server Pods** and **Expand Server Volumes** recovery actions (see [Keeping HA clusters alive](#keeping-ha-clusters-alive-through-host-maintenance))
 
 ## Requirements
 
@@ -106,6 +109,80 @@ This extension can't fix the bug. Until upstream does, use one of these:
 - Use **Download KubeConfig** on the k3k cluster and run `kubectl` locally, or download the kubeconfig from the imported cluster in Rancher
 - Use **virtual** mode if you need the in-browser shell. The bug report covers shared mode only. See the privileged-pod caveat under [Usage](#usage) first
 
+## Keeping HA clusters alive through host maintenance
+
+k3k HA clusters (3+ servers) run embedded etcd in the server pods, and have a few sharp
+edges when the host drains or reboots nodes (for example during a Harvester upgrade).
+The cluster's detail page shows a **Server health** panel that flags these.
+
+| Problem | Symptom | What the extension does |
+| --- | --- | --- |
+| All servers deleted at once; k3k can't remove their etcd members because the virtual API is down | Server pods stuck in `Terminating` on `etcdpod.k3k.io/finalizer`; node drains hang (Harvester upgrade stuck at **Pre-drained**) | Flags stuck pods; **Release Stuck Server Pods** action |
+| etcd peer URLs are pod IPs, and each restart changes the IP | After a node reboot, servers elect forever (`dial tcp <old-ip>:2380: i/o timeout`) | Flags lost quorum and servers sharing a node; see the runbook below |
+| Each time a server's member is removed and the pod comes back, k3s keeps a `server/db/etcd-backup-*` copy; the default volume is 2G | `no space left on device` in a server's log, then crash loops | Create form defaults to 10Gi; flags volumes under 5Gi; **Expand Server Volumes** action |
+| Two servers on one host node | Rebooting that node takes etcd below quorum | Flags it; **Spread servers across host nodes** (required pod anti-affinity, on by default for new HA clusters) |
+
+Before draining or rebooting a host node:
+
+1. Open each virtual cluster's detail page and check that every server is ready and no
+   warnings are shown
+2. Drain one node at a time, and wait for all servers to be ready again before the next
+
+### Recovering etcd quorum
+
+Check which servers' API actually works (`Ready` only means the port is open):
+
+```bash
+kubectl -n <ns> exec k3k-<name>-server-0 -- kubectl get --raw /readyz
+```
+
+**A server is a member, but etcd has its old IP** (it logs `this server is not a member of the
+etcd cluster. Found [... https://<old-ip>:2380 ...]`): update its peer URL from a healthy
+server, using a throwaway etcdctl container that borrows that server's certificates:
+
+```bash
+R=/proc/1/root/var/lib/rancher/k3s/server/tls/etcd
+kubectl -n <ns> debug k3k-<name>-server-1 --image=quay.io/coreos/etcd:v3.6.0 \
+  --target=k3k-<name>-server --profile=general -- \
+  etcdctl --endpoints=https://127.0.0.1:2379 --cacert=$R/server-ca.crt \
+  --cert=$R/server-client.crt --key=$R/server-client.key \
+  member update <member-id> --peer-urls=https://<new-pod-ip>:2380
+```
+
+(Run it once with `member list -w table` instead to find the member IDs.)
+
+**A server was removed from etcd but still has its old data** (the others have quorum; it
+isn't in `member list`, and its log only shows `dial tcp <old-ip>:2380` timeouts). It never
+learns it was removed, so restarting it doesn't help. Make it re-join as a new member:
+
+```bash
+kubectl -n <ns> exec k3k-<name>-server-N -- sh -c \
+  'cd /var/lib/rancher/k3s/server/db && mv etcd etcd-stale && mkdir -m 700 etcd'
+# restart the container by stopping k3s (PID 1 is a shell and ignores SIGTERM)
+kubectl -n <ns> exec k3k-<name>-server-N -- sh -c \
+  'for p in /proc/[0-9]*; do case "$(tr "\0" " " < $p/cmdline)" in "/bin/k3s server"*) kill ${p#/proc/};; esac; done'
+```
+
+Leave the **empty** `db/etcd` directory in place: if it is missing on server-0, k3k's startup
+script bootstraps a brand-new cluster instead of joining, and you get two etcd clusters.
+Delete `etcd-stale` once the server is back in `member list`.
+
+**No two servers can reach each other** (every server is electing): rebuild from one server.
+
+1. Take Longhorn (or CSI) snapshots of all server volumes
+2. Set `spec.servers: 1`. k3k restarts server-0 in single-node mode, and its startup
+   script runs `k3s server --cluster-reset` on the existing data. Server pods that hang in
+   `Terminating` can be released with **Release Stuck Server Pods**
+3. With server-0 serving, move `server/db` aside on the other server volumes (for example from
+   a one-off pod that mounts the PVC); keep `server/token` and `server/tls`
+4. Set `spec.servers` back to 3. The other servers join as new members
+
+Pick the server whose data is newest for step 2. If that isn't server-0, copy its
+`server/db` onto server-0's volume first, otherwise you roll back to server-0's state.
+
+Clean up afterwards: `server/db/etcd-backup-*` directories and anything you moved
+aside are not removed automatically.
+
 ## Development
 
 Requires Node 24 and Yarn 1.
@@ -122,7 +199,9 @@ Code lives in `pkg/k3k-rancher-ui/`:
 | Path | Purpose |
 | --- | --- |
 | `product.ts` | Registers the Virtual Clusters product and its resource types |
-| `models/k3k.io.cluster.js` | State badge, Download KubeConfig / Import into Rancher / Open in Rancher actions, linked delete |
+| `models/k3k.io.cluster.js` | State badge, Download KubeConfig / Import into Rancher / Open in Rancher / recovery actions, linked delete |
+| `detail/k3k.io.cluster.vue` | Detail page with the Server health panel |
+| `utils/server-health.js` | Server pod / volume health checks (stuck finalizers, quorum, co-location, volume size) |
 | `utils/rancher-import.js` | Creates the Rancher cluster, fetches the manifest, writes the addon Secret |
 | `edit/k3k.io.cluster.vue` | Create / edit form |
 | `types.ts` | Resource type IDs and option lists |
