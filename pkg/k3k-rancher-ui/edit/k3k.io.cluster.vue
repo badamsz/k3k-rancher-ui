@@ -15,6 +15,9 @@ import { getAllOptionsAfterCurrentVersion, filterOutDeprecatedPatchVersions } fr
 import sortBy from 'lodash/sortBy';
 import impl from '@shell/mixins/create-edit-view/impl';
 import { ANNOTATIONS, defaultRancherName, prepareRancherImport } from '../utils/rancher-import';
+import {
+  DEFAULT_STORAGE_SIZE, MIN_RECOMMENDED_BYTES, hasServerSpread, parseQuantity, setServerSpread
+} from '../utils/server-health';
 
 export default {
   name:         'EditK3kCluster',
@@ -58,6 +61,12 @@ export default {
     v.spec.agents = v.spec.agents ?? 0;
     v.spec.persistence = v.spec.persistence || { type: 'dynamic' };
 
+    // k3k's 2G default fills up: k3s keeps etcd snapshots and an etcd-backup-* copy
+    // of the data each time a server re-joins. The size can't be changed later.
+    if (this.mode === 'create' && v.spec.persistence.type === 'dynamic' && !v.spec.persistence.storageRequestSize) {
+      v.spec.persistence.storageRequestSize = DEFAULT_STORAGE_SIZE;
+    }
+
     let exposeType = 'none';
 
     if (v.spec.expose?.loadBalancer) {
@@ -72,6 +81,9 @@ export default {
       k3sReleases:        null,
       defaultK3s:         '',
       showDeprecated:     false,
+      // Applied in a before-save hook, since the anti-affinity term needs the final name
+      spreadServers:      this.mode === 'create' ? true : hasServerSpread(v.spec, v.metadata?.name),
+      initialSpread:      this.mode === 'create' ? null : hasServerSpread(v.spec, v.metadata?.name),
       importIntoRancher:  this.mode === 'create',
       rancherName:        '',
       createdProvCluster: null,
@@ -85,6 +97,7 @@ export default {
 
   created() {
     this.registerBeforeHook(this.normalizeVersion, 'normalizeVersion', 100);
+    this.registerBeforeHook(this.applyServerSpread, 'serverSpread', 150);
     // Run after NameNsDescription's hooks (which may create the namespace)
     this.registerBeforeHook(this.doRancherImport, 'rancherImport', 200);
   },
@@ -161,6 +174,19 @@ export default {
     lockedAfterCreate() {
       return this.isEdit || this.isView;
     },
+
+    storageTooSmall() {
+      const bytes = parseQuantity(this.value.spec.persistence?.storageRequestSize || '2G');
+
+      return !Number.isNaN(bytes) && bytes < MIN_RECOMMENDED_BYTES;
+    },
+
+    // An even server count adds a failure without adding tolerance (2 servers tolerate 0 failures)
+    evenServers() {
+      const n = this.value.spec.servers;
+
+      return n > 1 && n % 2 === 0;
+    },
   },
 
   watch: {
@@ -190,6 +216,16 @@ export default {
       }
 
       this.value.spec.version = v;
+    },
+
+    applyServerSpread() {
+      // Only touch spec.serverAffinity when there's something to do, so editing an
+      // unrelated field never rolls the server StatefulSet
+      const want = this.spreadServers && this.value.spec.servers > 1;
+
+      if (want !== hasServerSpread(this.value.spec, this.value.metadata.name)) {
+        setServerSpread(this.value.spec, this.value.metadata.name, want);
+      }
     },
 
     async doRancherImport() {
@@ -331,6 +367,30 @@ export default {
       </div>
     </div>
 
+    <div
+      v-if="value.spec.servers > 1"
+      class="row mb-10"
+    >
+      <div class="col span-12">
+        <Checkbox
+          v-model:value="spreadServers"
+          label="Spread servers across host nodes"
+          tooltip="Required pod anti-affinity: each server gets its own host node. A server that can't is left Pending, which keeps etcd quorum; two servers on one node lose it when that node reboots."
+          :mode="mode"
+        />
+      </div>
+    </div>
+    <Banner
+      v-if="isEdit && initialSpread !== null && spreadServers !== initialSpread && value.spec.servers > 1"
+      color="warning"
+      label="Changing server placement restarts the server pods one at a time. Save only while all servers are ready."
+    />
+    <Banner
+      v-if="evenServers && !isView"
+      color="warning"
+      :label="`${ value.spec.servers } servers tolerate no more failures than ${ value.spec.servers - 1 }. Use an odd number (3 or 5) for HA.`"
+    />
+
     <h3>Storage</h3>
     <div class="row mb-20">
       <div class="col span-3">
@@ -367,6 +427,18 @@ export default {
         </div>
       </template>
     </div>
+    <template v-if="isDynamic && !isView">
+      <Banner
+        v-if="isCreate"
+        :color="storageTooSmall ? 'warning' : 'info'"
+        label="The size can't be changed after creation. Each server volume holds etcd plus k3s's etcd snapshots and an etcd-backup copy every time a server re-joins (e.g. after a node drain), so small volumes fill up. 10Gi or more is recommended."
+      />
+      <Banner
+        v-else
+        color="info"
+        label="To grow existing server volumes, use the Expand Server Volumes action on the cluster list."
+      />
+    </template>
 
     <h3>API server exposure</h3>
     <div class="row mb-20">
